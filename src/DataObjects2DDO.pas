@@ -17,6 +17,7 @@ type
   public
     function Clone: TDataObjStreamerBase; override;
     class function FileExtension: string; override;
+    class function Description: string; override;
     class function GetFileFilter: string; override;
     class function IsFileExtension(aStr: string): boolean; override;
     class function ClipboardPriority: cardinal; override;
@@ -344,6 +345,11 @@ begin
     lNum:=fStream.Read(lSlotType, 4);
     if lNum<>4 then GenerateException(StrInvalidNumberOfBytes1);
     case lSlotType of
+      0{null}: begin
+        // Nothing more to read.
+        aDataObj.Clear;
+      end;
+
       1{string}, 8{symbol}: begin
         lNum:=fStream.Read(lSize, 4);    // get the size of the data
         if lNum <> 4 then GenerateException(StrInvalidNumberOfBytes2);
@@ -577,6 +583,11 @@ begin
     on e: Exception do
       GenerateException(e.Message);
   end;
+end;
+
+class function TDDOStreamer.Description: string;
+begin
+  result := 'DDO format.';
 end;
 
 initialization

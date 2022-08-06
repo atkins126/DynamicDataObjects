@@ -115,7 +115,10 @@ uses SysUtils, DateUtils, Generics.collections, Classes, VarInt, StreamCache, Rt
 {$Define cMakeMoreCompatibleWithOldDataObjects}
 
 
+
 type
+  TDataObjParameterPurpose = (cppDecoding, cppEncoding);
+  TDataObjParameterPurposes = set of TDataObjParameterPurpose;
   TOnHandleExceptionProc = procedure(Sender: TObject; aException: Exception);
   TMemberVisibilities = set of TMemberVisibility;      // used for RTTI assigning
   TDataObjAssignContext = class
@@ -127,6 +130,7 @@ type
     DoNotSerializeDefaultValues: boolean;   // if set to true, then we won't serialize out to a frame those properties that contain a value that is the default value.  EG) an integer that has the value zero.
     SerializeEnumerationsAsIntegers: boolean; // if set to true, then we serialize enumeration values out as a number.  If the enumeration has a small set of values, it will be a byte.  If it has a lot, it will be an integer.
                                               // by default, the enumeration value is serialized as a symbol text.
+    IncludeSerializingClassName: boolean;     // by default this is true.  Means that we will add "_Class" field to the dataObject we are serializing to.
     constructor Create;
     destructor Destroy; override;
     function IsAlreadySerialized(aObject: TObject): boolean;
@@ -189,7 +193,6 @@ type
     cDataTypeTime = 11,
     cDataTypeGUID = 12,       // Stored and streamed as the 16 byte data that makes up a GUID.
     cDataTypeObjectID = 13,   // equivalent to the BSON ObjectID  12 bytes.   https://docs.mongodb.com/manual/reference/method/ObjectId/
-//    cDataTypeUTF8String = 16,      // UTF-8 encoded string.  Note that each string data type can have flags
     cDataTypeString = 14,     // Unicode encode string.   always 2 bytes per character.
     cDataTypeStringList = 15,
     cDataTypeFrame = 16,           // Each slot in the frame is identified by a case-insensitive
@@ -517,6 +520,8 @@ type
     function Clone: TDataObjStreamerBase; virtual; abstract;
 
     class function FileExtension: string; virtual; abstract;
+    class function Description: string; virtual; abstract;
+    class procedure GetParameterInfo(aParameterPurpose: TDataObjParameterPurposes; aStrings: TStrings); virtual;  // Will fill aStrings with information about the optional parameters that the streamer may support.
     class function GetFileFilter: string; virtual; abstract;
     class function IsFileExtension(aStr: string): boolean; virtual;
     class function ClipboardPriority: cardinal; virtual; abstract;
@@ -1254,21 +1259,31 @@ var
   lProperties: TArray<TRttiProperty>;
 begin
   // Now go though the members of the instance and serialize those
-  lRttiType := GetRttiContext.GetType(aObj.ClassType);
-
-  if lRttiType.IsInstance then
+  if aObj = nil then
   begin
-    lFrame := aDataObj.AsFrame;
-    aAssignContext.AddObject(aObj);   // important to be here so that child properties can't ultimately refer back to aObj and cause infinite recursion.
+    aDataObj.Clear;   // makes the dataObj contain nil because aObj is nil.
+  end
+  else
+  begin
+    lRttiType := GetRttiContext.GetType(aObj.ClassType);
 
-    lProperties := lRttiType.GetProperties;
-    for lRttiProp in lProperties do
+    if lRttiType.IsInstance then
     begin
-      if (lRTTIProp.IsReadable) then
+      lFrame := aDataObj.AsFrame;
+      aAssignContext.AddObject(aObj);   // important to be here so that child properties can't ultimately refer back to aObj and cause infinite recursion.
+
+      if aAssignContext.IncludeSerializingClassName then
+        lFrame.NewSlot('_Class').AsSymbol := aObj.ClassName;
+
+      lProperties := lRttiType.GetProperties;
+      for lRttiProp in lProperties do
       begin
-        if (lRTTIProp.Visibility in aAssignContext.MemberVisibilities) then
+        if (lRTTIProp.IsReadable) then
         begin
-          AssignObjectPropertyToFrame(lFrame, aObj, lRttiProp, aAssignContext);
+          if (lRTTIProp.Visibility in aAssignContext.MemberVisibilities) then
+          begin
+            AssignObjectPropertyToFrame(lFrame, aObj, lRttiProp, aAssignContext);
+          end;
         end;
       end;
     end;
@@ -1292,7 +1307,7 @@ var
   lRecord: TRttiRecordType;
   lFrame: TDataFrame;
   lField: TRttiField;
-  lValue: TValue;
+  lValue: TValue;   // for nested records.
 type
   PTGuid = ^TGUID;
 begin
@@ -1318,27 +1333,26 @@ begin
         // Emumerations can either be serialized as text symbols or as ordinal values?   Default option is to do symbols(text).  We need to detect type and do either.
         case aDataObj.DataType.Code of
           cDataTypeNull: begin
-            aValue := nil;
-            result := true;
+            result := false;
           end;
           cDataTypeBoolean: begin
-            aValue := aDataObj.AsBoolean;
-            result := true;
+            result := false;
           end;
           cDataTypeByte: begin
-            aValue := aDataObj.AsByte;
+            aValue.FromOrdinal(aValue.TypeInfo, aDataObj.AsByte);
             result := true;
           end;
           cDataTypeInt32: begin
-            aValue := aDataObj.AsInt32;
+            aValue.FromOrdinal(aValue.TypeInfo, aDataObj.AsInt32);
             result := true;
           end;
           cDataTypeInt64: begin
-            aValue := aDataObj.AsInt64;
+            aValue.FromOrdinal(aValue.TypeInfo, aDataObj.AsInt64);
             result := true;
           end;
           cDataTypeString: begin
-            aValue := GetEnumValue(aValue.TypeInfo, aDataObj.AsString);
+            aValue.FromOrdinal(aValue.TypeInfo, GetEnumValue(aValue.TypeInfo, aDataObj.AsString));
+//            aValue := GetEnumValue(aValue.TypeInfo, aDataObj.AsString);
 //            aRttiProp.SetValue(aObj, TValue.FromOrdinal(lValue.TypeInfo, GetEnumValue(lValue.TypeInfo, aDataObj.AsString)));
             result := true;
           end;
@@ -1372,6 +1386,9 @@ begin
         case aDataObj.DataType.Code of
           cDataTypeSingle: begin aValue := aDataObj.AsSingle; result := true; end;
           cDataTypeDouble: begin aValue := aDataObj.AsDouble; result := true; end;
+          cDataTypeDatetime: begin aValue := aDataObj.AsDateTime; result := true; end;
+          cDataTypeTime: begin aValue := aDataObj.AsTime; result := true; end;
+          cDatatypeDate: begin aValue := aDataObj.AsDate; result := true; end;
         end;
       end;
 
@@ -2378,6 +2395,7 @@ var
   lFS: TFileStream;
   lRS: TStreamReadCache;
 begin
+  result := nil;
   lFS := TFileStream.Create(aFilename, fmOpenRead + fmShareDenyNone);
   try
     lRS := TStreamReadCache.Create(lFS);
@@ -2396,13 +2414,16 @@ begin
         end
         else
         begin
-          // FINISH - If nothing concrete was found, then attempt to load from each of the streamers and if one of them doesn't except out, then maybe it was successful loading
-          // For now, generate an exception.
-          raise(exception.Create(format('%s is not a format that can be loaded into a dataObject.',[aFilename])));
+         // FINISH - If nothing concrete was found, then attempt to load from each of the streamers and if one of them doesn't except out, then maybe it was successful loading
+         // For now, we are returning nil to signal that we could not get a streamer to do the load.
+          //raise(exception.Create(format('%s is not a format that can be loaded into a dataObject.',[aFilename])));
         end;
       end;
-      result.ApplyOptionalParameters(aOptionalParameters);
-      result.Decode(self);
+      if assigned(result) then
+      begin
+        result.ApplyOptionalParameters(aOptionalParameters);
+        result.Decode(self);
+      end;
     finally
       lRS.free;
     end;
@@ -3443,6 +3464,14 @@ begin
   result := SameText(aStr, FileExtension) or SameText(aStr, '.'+FileExtension);
 end;
 
+class procedure TDataObjStreamerBase.GetParameterInfo(aParameterPurpose: TDataObjParameterPurposes; aStrings: TStrings);
+begin
+  // Most descendant classes will not have optional streaming parameters so we implement a base here to do nothing
+end;
+
+
+
+
 
 procedure DataObjConvertStringListToArrayOfStrings(aDataObj: TDataObj);
 var
@@ -3492,6 +3521,7 @@ constructor TDataObjAssignContext.Create;
 begin
   inherited Create;
   fSerializedObjects := TList.Create;
+  IncludeSerializingClassName := true;
 end;
 
 destructor TDataObjAssignContext.Destroy;
