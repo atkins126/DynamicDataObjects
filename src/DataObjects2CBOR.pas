@@ -1,5 +1,34 @@
 unit DataObjects2CBOR;
 
+{********************************************************************************}
+{                                                                                }
+{                         Dynamic Data Objects Library                           }
+{                                                                                }
+{                                                                                }
+{ MIT License                                                                    }
+{                                                                                }
+{ Copyright (c) 2022 Sean Solberg                                                }
+{                                                                                }
+{ Permission is hereby granted, free of charge, to any person obtaining a copy   }
+{ of this software and associated documentation files (the "Software"), to deal  }
+{ in the Software without restriction, including without limitation the rights   }
+{ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell      }
+{ copies of the Software, and to permit persons to whom the Software is          }
+{ furnished to do so, subject to the following conditions:                       }
+{                                                                                }
+{ The above copyright notice and this permission notice shall be included in all }
+{ copies or substantial portions of the Software.                                }
+{                                                                                }
+{ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR     }
+{ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,       }
+{ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE    }
+{ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER         }
+{ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  }
+{ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  }
+{ SOFTWARE.                                                                      }
+{                                                                                }
+{********************************************************************************}
+
 interface
 
 uses classes, DataObjects2, DataObjects2Streamers, SysUtils, RTTI, TypInfo, DataObjects2Utils;
@@ -90,13 +119,16 @@ Tag	Data Item	Semantics	Reference
 
   *)
 
+  ECBORStreamerExceptionCantReadStream = class(Exception);
+  ECBORStreamerExceptionInvalidFormat = class(Exception);
+
 
   TCBORStreamer = class(TDataObjStreamerBase)
   private
     fCurrentTagValue: Int64;        // used to keep track of state when decoding.
-  public
-    function Clone: TDataObjStreamerBase; override;
+    procedure DoRead(var Buffer; Count: Longint);
 
+  public
     class function FileExtension: string; override;
     class function Description: string; override;
     class function GetFileFilter: string; override;
@@ -108,6 +140,7 @@ Tag	Data Item	Semantics	Reference
   end;
 
   procedure WriteObjectToCBORStream(aStream: TStream; aObject: TObject);
+  procedure DoReadStream(aStream: TStream; var Buffer; Count: Longint);
 
 implementation
 
@@ -482,7 +515,7 @@ end;
 
 procedure RaiseParsingException(aStream: TStream; aMessage: string);
 begin
-  raise Exception.Create(aMessage+' when reading a CBOR Stream at position='+intToStr(aStream.Position));
+  raise ECBORStreamerExceptionInvalidFormat.Create(aMessage+' when reading a CBOR Stream at position='+intToStr(aStream.Position));
 end;
 
 
@@ -500,21 +533,21 @@ begin
       result := aSubType;    // subtype just contains the negative int directly
     end;
     24: begin
-      aStream.Read(lSimpleValue, 1);
+      DoReadStream(aStream, lSimpleValue, 1);
       result := lSimplevalue;  // numbers 24-255 are covered by reading one more byte.
     end;
     25: begin
-      aStream.Read(lShort, 2);
+      DoReadStream(aStream, lShort, 2);
       lShort := SwapBytes(lShort);
       result := lShort;     // numbers 256-65535 are covered by reading two bytes
     end;
     26: begin
-      aStream.Read(lCardinal, 4);
+      DoReadStream(aStream, lCardinal, 4);
       lCardinal := SwapBytes(lCardinal);
       result := lCardinal;  // numbers 65536 -  2 billion are covered by reading four bytes
     end;
     27: begin
-      aStream.Read(lUInt64, 8);  // 8 byte unsigned int64.
+      DoReadStream(aStream, lUInt64, 8);  // 8 byte unsigned int64.
       lUInt64 := SwapBytes(lUInt64);
       result := lUInt64;
     end
@@ -880,16 +913,33 @@ begin
   result := 'Compact Binary Object Representation. https://cbor.io/ and https://en.wikipedia.org/wiki/CBOR';
 end;
 
+// This is a helper routine that we use for reading some bytes from the stream where it will generate an exception for us
+// if we could not read the number of bytes that were needed to be read.
+procedure DoReadStream(aStream: TStream; var Buffer; Count: Longint);
+var
+  lDidReadCount: integer;
+begin
+  lDidReadCount := aStream.Read(Buffer, Count);
+  if lDidReadCount <> Count then
+  begin
+    raise ECBORStreamerExceptionCantReadStream.Create('Unable to read '+IntToStr(Count)+' Bytes from stream when reading a CBOR Stream at position='+intToStr(aStream.Position));
+  end;
+end;
+
+
+// This is a helper routine that we use for reading some bytes from the stream where it will generate an exception for us
+// if we could not read the number of bytes that were needed to be read.
+procedure TCBORStreamer.DoRead(var Buffer; Count: Longint);
+begin
+  DoReadStream(fStream, Buffer, Count);
+end;
+
+
 class function TCBORStreamer.ClipboardPriority: cardinal;
 begin
   result := 20;
 end;
 
-function TCBORStreamer.Clone: TDataObjStreamerBase;
-begin
-  result := TCBORStreamer.Create(fStream);
-  // there aren't any properties to clone over to the new one being returned
-end;
 
 procedure TCBORStreamer.Decode(aDataObj: TDataObj);
 var
@@ -908,9 +958,8 @@ var
   lSlotName: string;
   lObject: TObject;
   lBinary: TDataBinary;
-
 begin
-  fStream.Read(lMajorType, 1);
+  DoRead(lMajorType, 1);
   lSubType := lMajorType and $1F;     // first 5 bits
   lMajorType := lMajorType shr 5;  // get it to a 0-7 range
 
@@ -922,15 +971,15 @@ begin
           aDataObj.AsByte := lSubtype;    // subtype just contains the unsigned int directly
         end;
         24: begin
-          fStream.Read(lSimpleValue, 1);
+          DoRead(lSimpleValue, 1);
           aDataObj.AsByte := lSimplevalue;  // numbers 24-255 are covered by reading one more byte
         end;
         25: begin
-          fStream.Read(lShort, 2);
+          DoRead(lShort, 2);
           aDataObj.AsInt32 := SwapBytes(lShort);     // numbers 256-65535 are covered by reading two bytes
         end;
         26: begin
-          fStream.Read(lCardinal, 4);
+          DoRead(lCardinal, 4);
           lCardinal := SwapBytes(lCardinal);
           if lCardinal > $7FFFFFFF then
             aDataObj.AsInt64 := lCardinal   // since the 32bit unsigned number is over the largest signed number possible, we must put into a 64bit integer.
@@ -938,7 +987,7 @@ begin
             aDataObj.AsInt32 := lCardinal;  // numbers 65536 -  2 billion are covered by reading four bytes
         end;
         27: begin
-          fStream.Read(lInt64, 8);
+          DoRead(lInt64, 8);
           lInt64 := SwapBytes(lInt64);
 (*          if (lInt64 > $7FFFFFFFFFFFFFFF) then        FINISH - Need to figure out what to do about this situation.  Do we add full UInt64 support to DataObjects, or do we produce an error situation here?
           begin
@@ -957,23 +1006,23 @@ begin
           aDataObj.AsByte := lSubtype;    // subtype just contains the negative int directly
         end;
         24: begin
-          fStream.Read(lSimpleValue, 1);
+          DoRead(lSimpleValue, 1);
           aDataObj.AsInt32 := -1-lSimplevalue;  // numbers 24-255 are covered by reading one more byte.
         end;
         25: begin
-          fStream.Read(lShort, 2);
+          DoRead(lShort, 2);
           aDataObj.AsInt32 := -1-SwapBytes(lShort);     // numbers 256-65535 are covered by reading two bytes
         end;
         26: begin
-          fStream.Read(lCardinal, 4);
+          DoRead(lCardinal, 4);
           if lCardinal > $7FFFFFFF then
             aDataObj.AsInt64 := -1-Integer(lCardinal)  // numbers 65536 -  2 billion are covered by reading four bytes
           else
             aDataObj.AsInt32 := -1-Integer(lCardinal);  // numbers 65536 -  2 billion are covered by reading four bytes
         end;
         27: begin
-          fStream.Read(lInt64, 8);
-          aDataObj.AsInt64 := -1-lInt64;     // 8 byte unsigned in64.  Problem we have here is that we natively model signed 64biters, so it's possible we get an incoming unsigned number that's too big here.
+          DoRead(lInt64, 8);
+          aDataObj.AsInt64 := -1-lInt64;     // 8 byte unsigned int64.  Problem we have here is that we natively model signed 64biters, so it's possible we get an incoming unsigned number that's too big here.
         end;
       end;
     end;
@@ -986,7 +1035,7 @@ begin
         // definite length byteStrings.  When it's done, we will receive an "end-Of-stream" marker which is major=7,sub=31.
         while true do
         begin
-          fStream.Read(lMajorType, 1);
+          DoRead(lMajorType, 1);
           if lMajorType=$FF then
           begin
             break;                          // we successfully hit the "break" stop code, so we are done reading chunks.
@@ -1086,7 +1135,7 @@ begin
           begin
             // Need to read a string only for the key.  The spec allows for reading any type of CBOR data type as a key, but we only support strings here.
             // maybe we will also support numbers for the sparse array which uses numbers as the keys.
-            fStream.Read(lMajorType,1);           // FINISH - If we ran out of stream bytes to read then we should have a different exception produced that what we get below which gives an incorrect exception message
+            DoRead(lMajorType,1);
             lSubType := lMajorType and $1F;     // first 5 bits
             lMajorType := lMajorType shr 5;  // get it to a 0-7 range
 
@@ -1133,7 +1182,7 @@ begin
         end;
         24: begin
           // Simple value in range of 32-255 so we need to read another byte from the stream.
-          fStream.Read(lSimpleValue, 1);
+          DoRead(lSimpleValue, 1);
           case lSimpleValue of
             0..31: begin
               //Invalid cause these values should have come with the prior MajorType byte.
@@ -1146,7 +1195,7 @@ begin
         end;
         25: begin
           // read two more bytes for a half-precision 16 bit float.  Delphi doesn't have this data type.  Finish converting this someday in the future.
-          fStream.Read(lShort, 2);
+          DoRead(lShort, 2);
           (* The following C code will decode the lShort 16 bit unsigned int into a double float.  FINISH implementing this into a delphi single or double float
            double decode_half(unsigned char *halfp) {
              int half = (halfp[0] << 8) + halfp[1];
@@ -1172,13 +1221,13 @@ begin
         end;
         26: begin
           // read four more bytes for a 32 bit float
-          fStream.Read(lSingle, 4);
+          DoRead(lSingle, 4);
           lSingle := SwapBytes(lSingle);
           aDataObj.AsSingle := lSingle;
         end;
         27: begin
           // read 8 more bytes for a 64 bit float
-          fStream.Read(lDouble, 8);
+          DoRead(lDouble, 8);
           lDouble := SwapBytes(lDouble);
           aDataObj.AsDouble := lDouble;
         end;

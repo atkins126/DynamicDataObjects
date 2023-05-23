@@ -1,5 +1,34 @@
 unit DataObjects2Streamers;
 
+{********************************************************************************}
+{                                                                                }
+{                         Dynamic Data Objects Library                           }
+{                                                                                }
+{                                                                                }
+{ MIT License                                                                    }
+{                                                                                }
+{ Copyright (c) 2022 Sean Solberg                                                }
+{                                                                                }
+{ Permission is hereby granted, free of charge, to any person obtaining a copy   }
+{ of this software and associated documentation files (the "Software"), to deal  }
+{ in the Software without restriction, including without limitation the rights   }
+{ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell      }
+{ copies of the Software, and to permit persons to whom the Software is          }
+{ furnished to do so, subject to the following conditions:                       }
+{                                                                                }
+{ The above copyright notice and this permission notice shall be included in all }
+{ copies or substantial portions of the Software.                                }
+{                                                                                }
+{ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR     }
+{ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,       }
+{ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE    }
+{ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER         }
+{ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  }
+{ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  }
+{ SOFTWARE.                                                                      }
+{                                                                                }
+{********************************************************************************}
+
 interface
 
 uses SysUtils, DataObjects2, classes, Generics.collections, VarInt, Generics.Defaults;
@@ -19,6 +48,7 @@ type
     function FindStreamerClassByFilename(aFilename: string): TDataObjStreamerClass;
     function CreateStreamerByFilenameExtension(aExtension: string): TDataObjStreamerBase;
     function CreateStreamerByFilename(aFilename: string): TDataObjStreamerBase;
+    function AllStreamersFileDialogFilters: string;
   end;
 
   TStreamerRegistryComparer = class(TComparer<TDataObjStreamerClass>)
@@ -41,7 +71,6 @@ type
 
     procedure Decode(aDataObj: TDataObj); override;
     procedure Encode(aDataobj: TDataObj); override;
-    function Clone: TDataObjStreamerBase; override;
   end;
 
 var
@@ -51,19 +80,11 @@ procedure RegisterDataObjStreamer(aStreamer: TDataObjStreamerClass);
 
 implementation
 
-//uses LoggerUnit;
-
 { TDataObjStreamer }
 
 class function TDataObjStreamer.ClipboardPriority: cardinal;
 begin
   result := 1;    // highest priority
-end;
-
-function TDataObjStreamer.Clone: TDataObjStreamerBase;
-begin
-  result := TDataObjStreamer.Create(fStream);
-  // no properties to copy
 end;
 
 procedure TDataObjStreamer.Decode(aDataobj: TDataObj);
@@ -75,7 +96,6 @@ var
   lStore: PTDataStore;
   lDataObj: TDataObj;
   lValue: byte;
-  lDataType: TDataType;
 
   // Read a Unsigned UVarInt from the stream.
   function ReadUVarInt: UInt64;
@@ -129,13 +149,15 @@ begin
   lStore := aDataObj.getStore;
 
   fStream.Read(lValue, 1);
-  lDataType.Value := lValue;
-  aDataObj.DataType := lDataType;
+
+  aDataObj.SetDataTypeParts(TDataTypeCode(lValue and $1F), // 5  bits for the datatype code}
+                           (lValue shr 5) and $03,        // 2  bits for the subClass
+                           (lValue and $80)<>0);          // 1  bit for Has Attributes
+
   case aDataObj.DataType.Code of
     cDataTypeNull: begin end;
 
     cDataTypeBoolean: begin end;
-//    cDataTypeBooleanTrue: begin end;
 
     cDataTypeByte: begin
       lReadCount := fStream.Read(lStore.fDataByte, 1);
@@ -151,11 +173,6 @@ begin
       lReadCount := fStream.Read(lStore.fDataInt64, 8);
       if lReadCount <> 8 then DoException;
     end;
-
-(*    cDataTypeVarInt: begin
-      lVarInt.ReadFromStream(fStream);
-      lStore.dataInt64 := lVarInt;
-    end; *)
 
     cDataTypeSingle: begin
       lReadCount := fStream.Read(lStore.fDataSingle, 4);
@@ -200,10 +217,6 @@ begin
       lReadCount := fStream.Read(TDataObjectID(lStore.dataObjectID).Data, 12);
       if lReadCount <> 12 then DoException;
     end;
-
-(*    cDataTypeUTF8String: begin
-      UTF8string(lStore.dataUTF8String) := ReadUTF8String;
-    end; *)
 
     cDataTypeString: begin
       lStore.fdataString := ReadUnicodeString;
@@ -289,7 +302,7 @@ begin
   else
     begin
       // FINISH - need to generate a good exception here because we received a dataType that's not valid.
-      raise exception.Create('Read an invalid data type of '+IntToHex(lDataType.value,2));
+      raise exception.Create('Read an invalid data type of '+IntToHex(lValue,2));
     end;
   end;
 end;
@@ -339,83 +352,36 @@ var
     lVarInt.WriteToStream(fStream);
   end;
 
-(*  procedure WriteString(aString: String);
-  var
-    lUTF8String: UTF8String;
-    lSize: TUVarInt64;                                  // Notice that since string lengths can't possibly be a negative number, we are using an Unsigned VarInt instead which is faster.
-    lStr: AnsiString;
-    lX: LongInt;
-  begin
-    //Writes an ANSI version of the string
-    lStr := aString;
-    lX:=Length(lStr);
-    aStream.Write(lX,4);   // write 4 bytes representing the size of the string
-    if lX > 0 then
-      aStream.Write(lStr[1],lX);  // write the string data. Not Including the Null Byte.
-  end;*)
-
-
-
-  // This writes a UTF8 version of the unicode string with UVarInt length
-(*  procedure WriteString(aString: String);
-  var
-    lUTF8String: UTF8String;
-    lSize: TUVarInt64;                                  // Notice that since string lengths can't possibly be a negative number, we are using an Unsigned VarInt instead which is faster.
-  begin
-    lUTF8String := aString;                             // converts to UTF8 AnsiString
-    lSize := length(lUTF8String);                       // returns the number of bytes used in the string.
-    lSize.WriteToStream(aStream);
-    aStream.Write(lUTF8String[1], length(lUTF8String));    // FINISH this - decide on null terminator or starting size.
-  end;  *)
-
-
   procedure WriteUTF8String(aUTF8String: UTF8String);
   var
     lSize: TUVarInt64;                                      // Notice that since string lengths can't possibly be a negative number, we are using an Unsigned VarInt instead which is faster.
   begin
     lSize := length(aUTF8String);                           // returns the number of bytes used in the string.
     lSize.WriteToStream(fStream);
-    fStream.Write(aUTF8String[1], lSize);
+    if Integer(lSize) > 0 then
+      fStream.Write(aUTF8String[1], lSize);
   end;
 
   procedure WriteUnicodeString(aString: String);
   var
     lSize: TUVarInt64;                                  // Notice that since string lengths can't possibly be a negative number, we are using an Unsigned VarInt instead which is faster.
   begin
-    lSize := length(aString)*2;                         // returns the number of byres used in the string.  2 for each character.
+    lSize := length(aString)*2;                         // returns the number of bytes used in the string.  2 for each character.
     lSize.WriteToStream(fStream);
-    fStream.Write(aString[1], lSize);       // Unicode is two bytes per character.
+    if Integer(lSize) > 0 then
+      fStream.Write(aString[1], lSize);       // Unicode is two bytes per character.
   end;
-
-
-
-{  // This writes a UTF8 version of the unicode string but with a 4 byte length
-  procedure WriteString(aString: String);
-  var
-    lUTF8String: UTF8String;
-    lSize: integer;
-  begin
-    lUTF8String := aString;                             // converts to UTF8 AnsiString
-    lSize := length(lUTF8String);                       // returns the number of bytes used in the string.
-    aStream.Write(lSize,4);
-    aStream.Write(lUTF8String[1], length(lUTF8String));    // FINISH this - decide on null terminator or starting size.
-  end;}
-
-
-  // This option writes a fully unicode string
-{  procedure WriteString(aString: String);
-  var
-    lSize: TUVarInt64;                                  // Notice that since string lengths can't possibly be a negative number, we are using an Unsigned VarInt instead which is faster.
-  begin
-    lSize := length(aString);                       // returns the number of bytes used in the string.
-    lSize.WriteToStream(aStream);
-    aStream.Write(aString[1], lSize);    // FINISH this - decide on null terminator or starting size.
-  end;  }
-
 
 begin
   lStore := aDataObj.getStore;
-  lValue := aDataObj.DataType.Value;
+
+  // make a dataType value byte for transmission by bit smashing some things together.
+  lValue := (ord(aDataObj.DataType.Code) and $1F) or          // 5  bits for the datatype code.
+            ((aDataObj.DataType.SubClass and $03) shl 5);     // 2  bits for the subClass
+  if aDataObj.DataType.HasAttributes then
+    lValue := lValue or $80;                                  // 1  bit for Has Attributes
+
+
   fStream.Write(lValue, 1);
   case aDataObj.DataType.Code of
     cDataTypeNull: begin end;
@@ -423,7 +389,6 @@ begin
     cDataTypeByte: fStream.Write(lStore.fDataByte,1);
     cDataTypeInt32: fStream.Write(lStore.fDataInt32,4);
     cDataTypeInt64: fStream.Write(lStore.fDataInt64,8);
-//    cDataTypeVarInt: WriteVarInt(lStore.dataInt64);
     cDataTypeSingle: fStream.Write(lStore.fDataSingle,4);
     cDataTypeDouble: fStream.Write(lStore.fDataDouble,8);
 //    cDataTypeDecimal128:    not implemented yet.
@@ -433,9 +398,6 @@ begin
     cDataTypeTime: fStream.Write(lStore.fDataDateTime,8);
     cDataTypeGUID: fStream.Write(lStore.dataGUID.GUID, 16);
     cDataTypeObjectID: fStream.Write(lStore.dataObjectID.Data, 12);
-{    cDataTypeUTF8String: begin
-      WriteUTF8String(UTF8string(lStore.dataUTF8String));
-    end; }
     cDataTypeString: begin
       WriteUnicodeString(lStore.DataString);
     end;
@@ -499,23 +461,32 @@ begin
   result := 'DataObj';
 end;
 
-{ TDataObjStreamer }
-
-
-
-
-{ TStreamerRegistry }
 
 procedure RegisterDataObjStreamer(aStreamer: TDataObjStreamerClass);
 begin
   if not assigned(gStreamerRegistry) then
     gStreamerRegistry := TStreamerRegistry.Create;
   gStreamerRegistry.Add(aStreamer);
- // TLogger.Add('Reg '+aStreamer.ClassName);
 end;
 
 
 { TStreamerRegistry }
+
+function TStreamerRegistry.AllStreamersFileDialogFilters: string;
+var
+  i: integer;
+  lLine: string;
+begin
+  for i := 0 to count-1 do
+  begin
+    lLine := items[i].GetFileFilter;
+    if length(result)=0 then
+      result := lLine
+    else
+      result := result+'|'+lLine;
+  end;
+  result := result+'|All files (*.*)|*.*';
+end;
 
 function TStreamerRegistry.CreateStreamerByFilename(aFilename: string): TDataObjStreamerBase;
 var
@@ -567,7 +538,7 @@ end;
 
 function TStreamerRegistryComparer.Compare(const Left, Right: TDataObjStreamerClass): Integer;
 begin
-  result := Left.ClipboardPriority - right.ClipboardPriority;
+  result := Integer(Left.ClipboardPriority) - Integer(right.ClipboardPriority);
 end;
 
 initialization

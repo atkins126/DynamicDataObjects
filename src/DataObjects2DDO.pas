@@ -1,5 +1,34 @@
 unit DataObjects2DDO;
 
+{********************************************************************************}
+{                                                                                }
+{                         Dynamic Data Objects Library                           }
+{                                                                                }
+{                                                                                }
+{ MIT License                                                                    }
+{                                                                                }
+{ Copyright (c) 2022 Sean Solberg                                                }
+{                                                                                }
+{ Permission is hereby granted, free of charge, to any person obtaining a copy   }
+{ of this software and associated documentation files (the "Software"), to deal  }
+{ in the Software without restriction, including without limitation the rights   }
+{ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell      }
+{ copies of the Software, and to permit persons to whom the Software is          }
+{ furnished to do so, subject to the following conditions:                       }
+{                                                                                }
+{ The above copyright notice and this permission notice shall be included in all }
+{ copies or substantial portions of the Software.                                }
+{                                                                                }
+{ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR     }
+{ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,       }
+{ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE    }
+{ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER         }
+{ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,  }
+{ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE  }
+{ SOFTWARE.                                                                      }
+{                                                                                }
+{********************************************************************************}
+
 interface
 { This unit reads the traditional *.ddo file stream format.  This unit pretty much works although it has not been exhautively tested for streaming all the ddo
   data types and not all the data types have had code written to convert out to something in DDO format.
@@ -15,7 +44,6 @@ type
     procedure GenerateException(aMessage: string);
 
   public
-    function Clone: TDataObjStreamerBase; override;
     class function FileExtension: string; override;
     class function Description: string; override;
     class function GetFileFilter: string; override;
@@ -47,6 +75,7 @@ resourceString
   StrInvalidNumberOfBytes14 = 'Invalid number of bytes read while reading point geometry.';
   StrInvalidNumberOfBytes15 = 'Invalid number of bytes read while reading int64 data.';
   StrInvalidNumberOfBytes16 = 'Invalid number of bytes read while reading unknown data type size.';
+  StrInvalidPayloadSizeForNull = 'Invalid payload size of %d while reading a NULL value';
   StrErrorLoadingString = 'Error loading stringlist from stream.';
   StrErrorReadingSlotNameSize = 'Read slotname size of %d which is a size code for a slotname lookup index.  This capability is not supported on this reader.' ;
 
@@ -92,6 +121,8 @@ begin
     cDataTypeNull: begin
       lInteger := 0;  // code for nil
       fStream.Write(lInteger,4);    // Write out the slot type and thats all there is for this datatype
+      fStream.Write(lInteger,4);    // NOTE:  The original DataObject serialization actually did something wierd in that it considered the NULL data type to be in the class of "Unknown" data types.
+                                    //        As such, it would put into the stream a 0 for the data size (NULL Data size is zero) to make receiver happy.  SO, we do that here.  STUPID, but we are just trying to be compatible here.
     end;
 
     cDataTypeBoolean: begin
@@ -172,7 +203,7 @@ begin
       fStream.Write(lDateTime, 8);
     end;
 
-    cDataTypeGUID, cDataTypeObjectID, cDataTypeString: begin
+    cDataTypeGUID, cDataTypeObjectID: begin
       //FUTURE - we could have a preference on whether we want to stream a GUID as a string formatted GUID or as a binary form GUID.  For now, we will do string GUID.
       //FUTURE - we could have a preference on whether we want to stream an ObjectID as a string formatted ObjectID or as a binary form ObjectID.  For now, we will do string ObjectID
 
@@ -185,6 +216,21 @@ begin
       if lSize > 0 then
         fStream.Write(lAnsiStr[1], lSize);  // write the string data. Not Including the Null Byte.
     end;
+
+    cDataTypeString: begin
+      if aDataObj.DataType.SubClass=1 then    // NOTE that we have not defined a purpose for the values 2 and 3 yet, so we just treat them as strings by default.
+        lInteger := 8   // code for symbol
+      else
+        lInteger := 1;   // code for string
+      fStream.Write(lInteger, 4);
+
+      lAnsiStr := AnsiString(aDataObj.AsString);  //converting to ansiString.  potential data loss, but that's how DDO specs it.
+      lSize:=Length(lAnsiStr);
+      fStream.Write(lSize, 4);           // write 4 bytes representing the size of the string
+      if lSize > 0 then
+        fStream.Write(lAnsiStr[1], lSize);  // write the string data. Not Including the Null Byte.
+    end;
+
 
     cDataTypeStringList: begin
       lInteger := 11;   // code for stringList
@@ -314,12 +360,6 @@ begin
   result := 10;
 end;
 
-function TDDOStreamer.Clone: TDataObjStreamerBase;
-begin
-  result := TDDOStreamer.Create(fStream);
-  // no properties to copy
-end;
-
 procedure TDDOStreamer.Decode(aDataObj: TDataObj);
 var
   lSize: cardinal;
@@ -346,8 +386,13 @@ begin
     if lNum<>4 then GenerateException(StrInvalidNumberOfBytes1);
     case lSlotType of
       0{null}: begin
-        // Nothing more to read.
         aDataObj.Clear;
+
+        // Nothing more to read.  HOWEVER, the old DDO Streaming did something wierd where it considered the NULL data type as an "Unknown" data type, and
+        // as such, it needs to read a 4-byte size of the payload, which of course is going to be all zeros because there is no payload.  This is Stupid, but we need this to be compatible.
+        lNum:=fStream.Read(lSize, 4);    // get the size of the data which MUST be a zero.
+        if lNum <> 4 then GenerateException(StrInvalidNumberOfBytes2);
+        if lSize <> 0 then GenerateException(format(StrInvalidPayloadSizeForNull, [lSize]));
       end;
 
       1{string}, 8{symbol}: begin
@@ -406,10 +451,11 @@ begin
             end
             else
             begin
-              lSize := lByte;
-              SetLength(lAnsiString, lSize);
-              if lSize > 0 then
-                fStream.Read(lAnsiString[1], lSize);
+              SetLength(lAnsiString, lByte);
+              if lByte > 0 then
+              begin
+                fStream.Read(lAnsiString[1], lByte);
+              end;
             end;
 
             Decode(aDataObj.AsFrame.NewSlot(String(lAnsiString)));     // create a new slot and recursively load it from the stream
